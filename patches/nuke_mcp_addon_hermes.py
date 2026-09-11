@@ -22,7 +22,7 @@ import threading
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.0.8-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.0.9-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -1000,7 +1000,10 @@ def _register_panel():
     nuke = _get_nuke()
     import nukescripts
     nukescripts.panels.registerWidgetAsPanel(
-        "nuke_mcp_addon.NukeMCPPanel", PANEL_NAME, PANEL_ID
+        # The widget string is embedded in a PyCustom_Knob expression evaluated
+        # by Nuke where the module is not imported as a global name — use
+        # __import__ so the knob never raises NameError.
+        "__import__('nuke_mcp_addon').NukeMCPPanel", PANEL_NAME, PANEL_ID
     )
     try:
         nuke.menu("Pane").addCommand("%s/%s" % ("NukeMCP", PANEL_NAME), show_panel)
