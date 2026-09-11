@@ -5,6 +5,9 @@
 
 def _nukemcp_autostart():
     try:
+        import nuke
+        if not nuke.GUI:
+            return  # render workers / terminal mode: no UI, no autostart
         import nuke_mcp_addon
         if nuke_mcp_addon._read_pref():
             nuke_mcp_addon.start()

@@ -22,7 +22,7 @@ import threading
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.0.6-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.0.7-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -1053,6 +1053,11 @@ def show_panel():
 def start(port: int = DEFAULT_PORT):
     """Start the NukeMCP server and show the panel. Call from menu.py or Script Editor."""
     global _panel
+    nuke = _get_nuke()
+    if not getattr(nuke, "GUI", False):
+        # Headless render worker / terminal mode: run the socket server only,
+        # never touch Qt (panel registration would crash without QApplication).
+        return _start_standalone(port)
     import os as _os
     _src = _os.path.abspath(__file__)
     _msg = "nuke_mcp_addon v%s from %s (module mtime: %s)" % (
