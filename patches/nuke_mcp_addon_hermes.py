@@ -22,7 +22,7 @@ import threading
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.0.7-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.0.8-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -870,7 +870,6 @@ class NukeMCPPanel(QWidget):
 
         _track_instance(self)
         self._port = port
-        self._server: NukeMCPServer | None = None
 
         # Status row
         status_layout = QHBoxLayout()
@@ -900,30 +899,13 @@ class NukeMCPPanel(QWidget):
         self.setLayout(layout)
 
     def toggle_server(self):
-        """Start the server if stopped, stop it if running. Never raises."""
-        if self._server and self._server._running:
-            try:
-                self._server.stop()
-            except Exception as e:
-                self._append_log("stop error: %s" % e)
-            self._server = None
-            self._status_label.setText("Stopped")
-            self._toggle_btn.setText("Start")
-            self._append_log("Server stopped")
-            return False
-        try:
-            self._server = NukeMCPServer(self._port)
-            self._server.on_log.connect(self._append_log)
-            self._server.start()
-        except Exception as e:
-            self._append_log("start error: %s" % e)
-            self._server = None
-            self._status_label.setText("Error")
-            return False
-        self._status_label.setText("Running")
-        self._toggle_btn.setText("Stop")
-        self._append_log("addon v%s" % ADDON_VERSION)
-        return True
+        """Start or stop the module-level server, then sync the UI."""
+        if server_running():
+            stop()
+        else:
+            _start_standalone(self._port)
+        self.refresh()
+        return server_running()
 
     def _toggle_autostart_pref(self):
         """Toggle the persisted 'start with Nuke' preference."""
@@ -933,7 +915,19 @@ class NukeMCPPanel(QWidget):
         self._append_log("auto-start %s" % ("enabled" if val else "disabled"))
 
     def is_running(self):
-        return bool(self._server and self._server._running)
+        return server_running()
+
+    def refresh(self):
+        """Sync status label, button text, and log source with module state."""
+        running = server_running()
+        self._status_label.setText("Running" if running else "Stopped")
+        self._toggle_btn.setText("Stop" if running else "Start")
+        if running and not getattr(self, "_log_connected", False):
+            if _server_standalone is not None and _server_standalone.on_log is not None:
+                _server_standalone.on_log.connect(self._append_log)
+                self._log_connected = True
+                self._append_log("addon v%s - server running on port %d"
+                                 % (ADDON_VERSION, self._port))
 
     def _append_log(self, msg: str):
         self._log.append(msg)
@@ -1079,18 +1073,53 @@ def start(port: int = DEFAULT_PORT):
 
 
 def _start_standalone(port: int = DEFAULT_PORT):
-    """Run the server without a reachable panel instance."""
+    """Run the module-level server (used with or without a panel)."""
     global _server_standalone
     if _server_standalone and _server_standalone._running:
         return True
     try:
         _server_standalone = NukeMCPServer(port)
         _server_standalone.start()
-        print("[NukeMCP] server running standalone on port %d (panel docked)" % port)
+        print("[NukeMCP] server running on port %d" % port)
         return True
     except Exception as e:
         print("[NukeMCP] start error: %s" % e)
         return False
+
+
+def server_running() -> bool:
+    """True if the module-level server is running."""
+    return bool(_server_standalone and _server_standalone._running)
+
+
+def start(port: int = DEFAULT_PORT):
+    """Start the NukeMCP server and show the panel. Call from menu.py or Script Editor."""
+    global _panel
+    nuke = _get_nuke()
+    if not getattr(nuke, "GUI", False):
+        # Headless render worker / terminal mode: run the socket server only,
+        # never touch Qt (panel registration would crash without QApplication).
+        return _start_standalone(port)
+    import os as _os
+    _src = _os.path.abspath(__file__)
+    _msg = "nuke_mcp_addon v%s from %s (module mtime: %s)" % (
+        ADDON_VERSION, _src, _os.path.getmtime(_src))
+    log.info(_msg)
+    print("[NukeMCP]", _msg)
+    _register_panel_once()
+    show_panel()
+    ok = _start_standalone(port)
+    _refresh_panels()
+    return ok
+
+
+def _refresh_panels():
+    """Sync every live panel's UI with the module-level server state."""
+    for panel in _live_panels():
+        try:
+            panel.refresh()
+        except Exception:
+            pass
 
 
 def stop():
@@ -1104,13 +1133,7 @@ def stop():
         except Exception as e:
             print("[NukeMCP] stop error: %s" % e)
     _server_standalone = None
-    for panel in _live_panels():
-        try:
-            if panel.is_running():
-                panel.toggle_server()  # stops it
-                stopped = True
-        except Exception as e:
-            print("[NukeMCP] stop (panel) error: %s" % e)
+    _refresh_panels()
     if stopped:
         log.info("NukeMCP server stopped")
         print("[NukeMCP] server stopped")
