@@ -22,7 +22,7 @@ import threading
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.0.9-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.1.0-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -758,10 +758,12 @@ class NukeMCPServer:
             self._emit_log("Client disconnected")
 
     def _run_in_nuke(self, func, *args):
-        """Call func in Nuke's main thread (GUI) or via queue (headless)."""
+        """Call func in Nuke's main thread (GUI) and wait for its result."""
         nuke = _get_nuke()
         if nuke.GUI:
-            return nuke.executeInMainThread(func, args=args)
+            # executeInMainThread is fire-and-forget (returns None);
+            # WithResult blocks until the main thread returns the value.
+            return nuke.executeInMainThreadWithResult(func, args=args)
         if self._main_queue is not None:
             result_q = queue.Queue()
             self._main_queue.put((func, args, result_q))
@@ -776,9 +778,9 @@ class NukeMCPServer:
         client.settimeout(None)
         _event_client_socket = client
 
-        # Send handshake (direct call: only reads version strings, thread-safe)
+        # Send handshake via the main thread (WithResult blocks for the dict)
         try:
-            handshake = _handshake_data()
+            handshake = self._run_in_nuke(_handshake_data)
         except Exception as _e2:
             import traceback
             self._emit_log("HANDSHAKE ERROR: %s" % traceback.format_exc())
@@ -817,18 +819,10 @@ class NukeMCPServer:
                 if not handler:
                     response = {"status": "error", "error": f"Unknown command: {cmd_type}"}
                 else:
-                    response = None
                     try:
                         response = self._run_in_nuke(handler, params)
                     except Exception as e:
                         response = {"status": "error", "error": f"{type(e).__name__}: {e}"}
-                    if not isinstance(response, dict):
-                        # executeInMainThread may swallow/return None; run the
-                        # handler directly in this thread as a fallback.
-                        try:
-                            response = handler(params)
-                        except Exception as e:
-                            response = {"status": "error", "error": f"{type(e).__name__}: {e}"}
                     if not isinstance(response, dict):
                         response = {"status": "error",
                                     "error": "handler returned no response (main-thread call returned None)"}
