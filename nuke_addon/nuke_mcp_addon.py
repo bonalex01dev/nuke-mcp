@@ -23,7 +23,7 @@ import time
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.2.2-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.2.3-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -85,6 +85,30 @@ def _handle_ping(params: dict) -> dict:
     return {"status": "ok", "result": "pong"}
 
 
+def _jsonable(value):
+    """Valeur serialisable en JSON ; les objets Nuke passent par un attribut lisible.
+
+    Trouve en test (Test01, BlinkScript) : le knob `format` renvoie un objet `nuke.Format` ->
+    json.dumps leve TypeError dans _send -> le client ne recevait AUCUNE reponse (connexion
+    fermee, 0 octet) et le log du panneau s'arretait sur le `<- get_node_info`.
+    On tente un attribut parlant (`name`, puis `value`) avant de retomber sur str().
+    """
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        pass
+    for attr in ("name", "value"):
+        try:
+            got = getattr(value, attr)
+            got = got() if callable(got) else got
+            json.dumps(got)
+            return got
+        except Exception:
+            continue
+    return str(value)
+
+
 def _format_info(root):
     """Format du script en dict serialisable.
 
@@ -129,7 +153,7 @@ def _handle_get_node_info(params: dict) -> dict:
     knobs = {}
     for knob_name in node.knobs():
         try:
-            knobs[knob_name] = node[knob_name].value()
+            knobs[knob_name] = _jsonable(node[knob_name].value())
         except Exception:
             knobs[knob_name] = str(node[knob_name])
 
@@ -867,7 +891,14 @@ class NukeMCPServer:
                         response = {"status": "error",
                                     "error": "handler returned no response (main-thread call returned None)"}
 
-                self._send(client, response)
+                try:
+                    self._send(client, response)
+                except Exception as e:
+                    # Une valeur non serialisable ne doit PAS couper la connexion en silence :
+                    # le client recoit une erreur explicite et la raison est dans le log.
+                    self._emit_log(f"!! reponse non serialisable ({type(e).__name__}: {e})")
+                    self._send(client, {"status": "error",
+                                        "error": f"response not serialisable: {type(e).__name__}: {e}"})
                 self._emit_log(f"-> {response.get('status', '?')}")
 
 

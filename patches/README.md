@@ -40,6 +40,22 @@ Toggle: panel button "Start with Nuke" (the addon never creates or edits Nuke pr
     memory address.
   - `menu.py`: the "Show NukeMCP panel" entry was removed (it never worked — the pane is opened
     from the Pane menu) and the whole block is skipped when there is no GUI.
+- 0.2.3:
+  - **`get_node_info` ne coupe plus la connexion.** BlinkScript expose un knob `format` dont
+    `.value()` est un objet `nuke.Format` : `json.dumps` levait `TypeError` dans `_send`, donc le
+    client ne recevait AUCUNE reponse (0 octet, connexion fermee), le traceback partait sur la
+    console du Script Editor et le log du panneau s'arretait sur `<- get_node_info` sans `-> ok`.
+    Deux correctifs : `_jsonable()` (essaie `name`, puis `value`, avant `str`) sur chaque valeur de
+    knob, et un filet dans `_serve_client` qui renvoie une erreur explicite + ecrit une ligne `!!`
+    dans le log si une reponse reste non serialisable — plus jamais de client muet.
+  - Tests : `test01` passe **10/10** (`nuke_addon/tests/run_tests.py --scenario test01`).
+  - Notes relevees par les tests : `nuke.createNode` branche le nouveau node sur la **selection
+    courante** (le blur s'accroche donc au checkerboard sans qu'aucune connexion ne soit demandee) ;
+    sur ce build `nuke.activeViewer()` n'expose ni `setInput` ni `getInput` — on connecte par
+    `nuke.connectViewer(1, node)` PUIS `Viewer.activateInput(1)` (l'ordre inverse leve
+    `ValueError('Input is not connected.')`), et on relit la connexion sur
+    `nuke.activeViewer().node().input(1)` (l'index 0 du node viewer reste vide).
+
 - 0.2.2:
   - **Plusieurs clients en parallele.** `_serve` lance un thread par client accepte
     (`_handle_client` -> `_serve_client`). Avant, `_handle_client` bouclait sur SON client jusqu'a

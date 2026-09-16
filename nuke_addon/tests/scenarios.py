@@ -161,8 +161,9 @@ def _expect_viewer(result, node_name: str):
         raise AssertionError("resultat viewer inattendu: %r" % (result,))
     if result.get("readback") is None:
         raise AssertionError(
-            "connexion NON verifiable (used=%r, set_input_error=%r): aucune lecture de "
-            "viewer_input n'a abouti" % (result.get("used"), result.get("set_input_error")))
+            "connexion NON verifiable (used=%r, set_input_error=%r, active_input=%r): "
+            "aucune lecture de viewer_node.input() n'a abouti"
+            % (result.get("used"), result.get("set_input_error"), result.get("active_input")))
     if result["readback"] != node_name:
         raise AssertionError("viewer1 input 1 = %r, attendu %r"
                              % (result["readback"], node_name))
@@ -197,12 +198,19 @@ def _recompile_code(node_name: str) -> str:
 
 
 def _viewer_code(node_name: str) -> str:
-    """Connect viewer input 1 (setInput, else connectViewer) and READ IT BACK."""
+    """Connect viewer input 1 and READ IT BACK on the viewer NODE.
+
+    Nuke 17.1v1 has neither `Viewer.setInput` nor `Viewer.getInput` (checked with dir()):
+    the working pair is `activeViewer().activateInput(1)` + `nuke.connectViewer(1, node)`,
+    and the connection is readable on the viewer NODE — `activeViewer().node().input(1)`
+    (1 = the viewer input number, `input(0)` stays empty). Verified live 2026-09-16.
+    """
     return (
         "n = nuke.toNode('%s')\n"
         "v = nuke.activeViewer()\n"
         "res = {'viewer': (str(v) if v is not None else None), 'set_input_error': None,\n"
-        "       'used': None, 'method': None, 'readback': None}\n"
+        "       'used': None, 'method': None, 'readback': None, 'active_input': None,\n"
+        "       'activate_error': None}\n"
         "if v is None:\n"
         "    res['set_input_error'] = 'aucun viewer actif'\n"
         "else:\n"
@@ -215,18 +223,31 @@ def _viewer_code(node_name: str) -> str:
         "    if res['used'] is None:\n"
         "        try:\n"
         "            nuke.connectViewer(1, n)\n"
-        "            res['used'] = 'nuke.connectViewer'\n"
+        "            res['used'] = 'nuke.connectViewer(1, node)'\n"
         "        except Exception as e:\n"
         "            res['set_input_error'] = repr(e)\n"
+        "        # activateInput d'abord echoue sur ce build ('Input is not connected.') : a appeler\n"
+        "        # UNE FOIS la connexion faite, sinon l'input actif du viewer reste 0 (rien affiche).\n"
+        "        try:\n"
+        "            v.activateInput(1)\n"
+        "        except Exception as e:\n"
+        "            res['activate_error'] = repr(e)\n"
+        "    try:\n"
+        "        res['active_input'] = int(v.activeInput())\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    vn = v.node()\n"
         "    x = None\n"
-        "    for meth in ('getInput', 'input'):\n"
-        "        if hasattr(v, meth):\n"
-        "            try:\n"
-        "                x = getattr(v, meth)(1)\n"
-        "                res['method'] = meth\n"
-        "                break\n"
-        "            except Exception:\n"
-        "                continue\n"
+        "    for idx in (1, 0):\n"
+        "        if vn is None:\n"
+        "            break\n"
+        "        try:\n"
+        "            x = vn.input(idx)\n"
+        "        except Exception:\n"
+        "            x = None\n"
+        "        if x is not None:\n"
+        "            res['method'] = 'activeViewer().node().input(' + str(idx) + ')'\n"
+        "            break\n"
         "    if x is not None:\n"
         "        try:\n"
         "            res['readback'] = x.name()\n"
