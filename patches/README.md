@@ -40,6 +40,15 @@ Toggle: panel button "Start with Nuke" (the addon never creates or edits Nuke pr
     memory address.
   - `menu.py`: the "Show NukeMCP panel" entry was removed (it never worked — the pane is opened
     from the Pane menu) and the whole block is skipped when there is no GUI.
+- 0.2.2:
+  - **Plusieurs clients en parallele.** `_serve` lance un thread par client accepte
+    (`_handle_client` -> `_serve_client`). Avant, `_handle_client` bouclait sur SON client jusqu'a
+    sa deconnexion : le serveur MCP tenant une connexion permanente, **tout autre client etait
+    accepte par TCP mais jamais servi** (time-out partout, rien dans le log du panneau au-dela de
+    la paire connected/disconnected). Le dispatch direct en headless est desormais serialise
+    (`_direct_dispatch_lock`), sinon deux threads clients appelleraient Nuke en meme temps.
+  - Les evenements (`_push_event`) sont diffuses a **tous** les clients connectes, plus seulement
+    au dernier socket connecte.
 - (0.2.0 was an intermediate revision during the 2026-09-16 session, superseded by 0.2.1.)
 
 ## TODO

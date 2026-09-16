@@ -23,7 +23,7 @@ import time
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.2.1-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.2.2-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -568,21 +568,25 @@ def _handle_list_annotations(params: dict) -> dict:
 
 
 _event_client_socket = None
+_event_clients = set()  # TOUS les clients connectes (plusieurs en parallele)
+_direct_dispatch_lock = threading.Lock()  # headless : un appel Nuke a la fois
 _event_socket_lock = threading.Lock()
 _registered_callbacks = set()
 
 
 def _push_event(event_type: str, data: dict):
-    """Push an event to the connected MCP client."""
-    if _event_client_socket is None:
-        return
+    """Push an event to EVERY connected client (several can be attached at once)."""
     event = {"type": "event", "event_type": event_type, "data": data}
     msg = json.dumps(event) + "\n"
     with _event_socket_lock:
-        try:
-            _event_client_socket.sendall(msg.encode("utf-8"))
-        except OSError:
-            pass
+        clients = list(_event_clients)
+        if _event_client_socket is not None and _event_client_socket not in clients:
+            clients.append(_event_client_socket)  # compat: socket historique
+        for sock in clients:
+            try:
+                sock.sendall(msg.encode("utf-8"))
+            except OSError:
+                _event_clients.discard(sock)
 
 
 def _on_node_created():
@@ -773,8 +777,12 @@ class NukeMCPServer:
                 break
 
             self._emit_log(f"Client connected from {addr[0]}:{addr[1]}")
-            self._handle_client(client)
-            self._emit_log("Client disconnected")
+            # UN THREAD PAR CLIENT. Sans ca, _handle_client boucle sur son client jusqu'a sa
+            # deconnexion : un client persistant (le serveur MCP en tient un en permanence)
+            # monopolisait la boucle accept et AUCUN autre client n'etait jamais servi
+            # (requetes acceptees par TCP, jamais traitees -> tout time-out).
+            threading.Thread(target=self._handle_client, args=(client,),
+                             daemon=True).start()
 
     def _run_in_nuke(self, func, *args):
         """Call func in Nuke's main thread (GUI) and wait for its result."""
@@ -790,13 +798,30 @@ class NukeMCPServer:
             if isinstance(result, Exception):
                 raise result
             return result
-        return func(*args)
+        # Headless sans serve_forever() : plusieurs threads clients peuvent appeler
+        # Nuke en meme temps -> on serialise (le GUI passe par la main thread).
+        with _direct_dispatch_lock:
+            return func(*args)
 
     def _handle_client(self, client: socket.socket):
+        """Sert UN client, dans son propre thread. Boucle jusqu'a sa deconnexion."""
         global _event_client_socket
         client.settimeout(None)
         _event_client_socket = client
+        _event_clients.add(client)
+        try:
+            self._serve_client(client)
+        finally:
+            _event_clients.discard(client)
+            if _event_client_socket is client:
+                _event_client_socket = None
+            self._emit_log("Client disconnected")
+            try:
+                client.close()
+            except OSError:
+                pass
 
+    def _serve_client(self, client: socket.socket):
         # Send handshake via the main thread (WithResult blocks for the dict)
         try:
             handshake = self._run_in_nuke(_handshake_data)
@@ -805,10 +830,6 @@ class NukeMCPServer:
             self._emit_log("HANDSHAKE ERROR: %s" % traceback.format_exc())
             handshake = None
         if not isinstance(handshake, dict):
-            try:
-                client.close()
-            except OSError:
-                pass
             return
         self._send(client, handshake)
 
@@ -849,11 +870,6 @@ class NukeMCPServer:
                 self._send(client, response)
                 self._emit_log(f"-> {response.get('status', '?')}")
 
-        _event_client_socket = None
-        try:
-            client.close()
-        except OSError:
-            pass
 
     def _send(self, client: socket.socket, data: dict):
         msg = json.dumps(data) + "\n"
