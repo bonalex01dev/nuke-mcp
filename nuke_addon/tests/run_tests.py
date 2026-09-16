@@ -4,6 +4,7 @@
     python run_tests.py                          # tous les scenarios, backend addon (socket)
     python run_tests.py --scenario test01
     python run_tests.py --backend mcp            # via le serveur MCP (uv run nuke-mcp, stdio)
+    python run_tests.py --reset                  # efface tout sauf le viewer avant de lancer
     python run_tests.py --cleanup                # supprime les nodes crees a la fin
     python run_tests.py --list
     python run_tests.py --json out/test01.json   # ecrit le rapport
@@ -42,6 +43,8 @@ def parse_args(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=54321)
     p.add_argument("--timeout", type=float, default=60.0, help="per command, seconds")
+    p.add_argument("--reset", action="store_true",
+                   help="effacer tous les nodes SAUF le(s) Viewer avant de lancer (script propre)")
     p.add_argument("--cleanup", action="store_true",
                    help="delete the nodes the scenario created (default: leave them visible)")
     p.add_argument("--cleanup-first", action="store_true",
@@ -59,6 +62,20 @@ def header(args, handshake):
               % (handshake.get("addon_version"), handshake.get("nuke_version"),
                  handshake.get("variant")))
     print("=" * 74, flush=True)
+
+
+async def reset_script(api):
+    """Remise a zero demandee par l'utilisateur : tout sauf les viewers."""
+    try:
+        res = await api.exec_python(scenarios.reset_script_code())
+    except Exception as e:  # noqa: BLE001 - un reset impossible ne doit pas empecher le run
+        print("  reset impossible: %s: %s" % (type(e).__name__, e), flush=True)
+        return
+    if isinstance(res, dict):
+        print("  reset: %d node(s) supprime(s), garde(s)=%s%s"
+              % (len(res.get("supprimes") or []), res.get("gardes"),
+                 (" ; viewer recree: %s" % res["viewer_cree"]) if res.get("viewer_cree") else ""),
+              flush=True)
 
 
 async def cleanup_nodes(api, nodes, label: str):
@@ -131,6 +148,8 @@ async def amain(args) -> int:
                   % (args.host, args.port, type(e).__name__, e), file=sys.stderr)
             return 3
         header(args, hs)
+        if args.reset:
+            await reset_script(api)
         for n in names:
             reports.append(await run_scenario(api, n, args))
 

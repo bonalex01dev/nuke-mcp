@@ -112,3 +112,16 @@ sources d'interface :
 test02 verifie donc ce qui est deterministe : la compilation ratee a bien lieu, la popup est
 detectee et fermee, Nuke n'est pas reste bloque, et le controle negatif (blink01, kernel valide)
 ne produit ni popup ni erreur. Le texte du rapport se lit par l'arbre d'accessibilite.
+
+## Remise a zero : `--reset`
+
+```bash
+python run_tests.py --scenario all --reset
+```
+
+Efface **tous** les nodes du script **sauf le(s) Viewer** (et les `ViewerProcess`, internes au
+viewer), en recreant un `Viewer` s'il n'y en a plus. C'est la facon propre de partir d'un script
+vide sans perdre le viewer : `File > New comp` / `nuke.scriptClear()` les detruisent tous et n'en
+recree pas un identique — or les deux scenarios s'accrochent a `viewer1 input 1`.
+
+Sortie attendue : `reset: N node(s) supprime(s), garde(s)=['Viewer1']`.

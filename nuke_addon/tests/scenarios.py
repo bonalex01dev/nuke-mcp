@@ -524,6 +524,38 @@ def _enable_and_report_code(node_name: str) -> str:
     return _compile_report_code(node_name, enable=True)
 
 
+def reset_script_code() -> str:
+    """Effacer tout le script SAUF le(s) Viewer, en recreant un Viewer s'il n'y en a plus.
+
+    Demande utilisateur : partir d'un script propre avant un run. On garde les viewers parce que
+    les scenarios s'y accrochent (viewer1 input 1) et parce que `scriptClear()` les detruirait tous
+    sans recree le meme — un « File > New comp » equivaut donc a perdre le viewer.
+
+    Les noeuds `ViewerProcess` (internes au viewer) sont preserves aussi : Nuke les gere lui-meme.
+    """
+    return (
+        "def _run():\n"
+        "    import nuke\n"
+        "    gardes = []\n"
+        "    supprimes = []\n"
+        "    for n in list(nuke.allNodes()):\n"
+        "        try:\n"
+        "            cls = n.Class()\n"
+        "        except Exception:\n"
+        "            cls = ''\n"
+        "        if cls in ('Viewer', 'ViewerProcess'):\n"
+        "            gardes.append(n.name())\n"
+        "            continue\n"
+        "        supprimes.append(n.name())\n"
+        "        nuke.delete(n)\n"
+        "    cree = None\n"
+        "    if not [n for n in nuke.allNodes() if n.Class() == 'Viewer']:\n"
+        "        cree = nuke.createNode('Viewer', inpanel=False).name()\n"
+        "    return {'gardes': gardes, 'supprimes': supprimes, 'viewer_cree': cree}\n"
+        "result = _run()\n"
+    )
+
+
 def _disable_code(node_name: str) -> str:
     """Desactiver le noeud (`disable=True`).
 
