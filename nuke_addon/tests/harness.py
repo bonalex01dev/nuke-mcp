@@ -28,6 +28,47 @@ class BackendError(RuntimeError):
     pass
 
 
+def dismiss_nuke_dialogs(verbose: bool = False) -> int:
+    """Fermer les popups de Nuke par WM_CLOSE (Win32) — sans focus, sans coordonnees.
+
+    POURQUOI PAS EN PYTHON DANS NUKE : une compilation BlinkScript ratee ouvre une modale qui
+    bloque le main thread ; tant qu'elle est ouverte, AUCUNE commande de l'addon n'aboutit (meme le
+    handshake) et aucun garde-fou in-process ne peut la fermer — un QTimer ne tire pas, car Nuke
+    n'itere pas la boucle d'evenements pendant ce blocage (mesure : 0 tick, journal par fichier).
+
+    Le bouton OK n'est pas cliquable depuis Win32 (Qt dessine ses propres widgets, pas de fenetre
+    enfant native), mais WM_CLOSE sur la modale la referme ET debloque Nuke. Les modales portent
+    exactement le titre 'Nuke' ; la fenetre principale porte '<script> - Nuke'.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:  # pragma: no cover - Windows only
+        return 0
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    WM_CLOSE = 0x0010
+    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    found = []
+
+    def _text(hwnd):
+        n = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        return buf.value
+
+    def _cb(hwnd, _):
+        if user32.IsWindowVisible(hwnd) and _text(hwnd) == "Nuke":
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(proc(_cb), 0)
+    for hwnd in found:
+        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    if verbose and found:
+        print("      (popup Nuke fermee par WM_CLOSE: %d)" % len(found), flush=True)
+    return len(found)
+
+
 def unwrap(payload):
     """Addon/MCP responses are {"status": ..., "result": ...}; return the inner result.
 
@@ -82,6 +123,45 @@ class AddonBackend:
             except OSError:
                 pass
 
+    def send_only(self, command: str, **params):
+        """Envoyer une commande SANS attendre la reponse, puis fermer la connexion.
+
+        Pour les commandes qui peuvent ne jamais rendre la main : compiler un kernel BlinkScript en
+        erreur ouvre une modale qui bloque Nuke. On envoie sans attendre, l'etape suivante ferme la
+        popup de l'exterieur, puis on relit le rapport.
+        """
+        s = socket.socket()
+        s.settimeout(10)
+        try:
+            s.connect((self.host, self.port))
+            f = s.makefile("r")
+            json.loads(f.readline())                       # handshake
+            s.sendall((json.dumps({"type": command, "params": params}) + "\n").encode())
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+        return {"sent": command}
+
+    async def run_and_heal(self, coro_factory, attempts: int = 2):
+        """Executer un appel et, si Nuke ne repond plus, fermer la popup puis reessayer UNE fois.
+
+        Cas vise : une compilation BlinkScript ratee laisse une modale ouverte qui bloque le main
+        thread. On la ferme de l'exterieur (WM_CLOSE) au lieu de rester bloque jusqu'au timeout.
+        """
+        last = None
+        for i in range(attempts):
+            try:
+                return await coro_factory()
+            except BackendError as e:
+                last = e
+                if "no answer from the addon" not in str(e) or i == attempts - 1:
+                    raise
+                if not dismiss_nuke_dialogs(verbose=True):
+                    raise
+        raise last
+
     # --- vocabulary shared with the MCP tools ---
     async def acall(self, command: str, **params):
         return await asyncio.to_thread(self.call, command, **params)
@@ -112,8 +192,19 @@ class AddonBackend:
         return await self.acall("connect_nodes", output_node=output_node,
                                 input_node=input_node, input_index=input_index)
 
-    async def exec_python(self, code: str):
-        return await self.acall("execute_python", code=code, confirm=True)
+    async def exec_python(self, code: str, timeout: float | None = None):
+        """`timeout` (secondes) pour les etapes lentes — ex. une compilation BlinkScript qui ouvre
+        une popup : la commande ne rend la main qu'une fois la popup fermee."""
+        return await self.acall("execute_python", code=code, confirm=True, timeout=timeout)
+
+    async def send_only_python(self, code: str):
+        """`execute_python` non bloquant : pour les commandes qui peuvent ouvrir une modale.
+
+        Coroutine comme les autres appels (Session.step l'attend), mais l'envoi lui-meme ne se
+        bloque pas sur la reponse : la compilation peut ne jamais rendre la main.
+        """
+        return await asyncio.to_thread(self.send_only, "execute_python",
+                                       code=code, confirm=True)
 
 
 # --------------------------------------------------------------------------- MCP server
@@ -190,8 +281,13 @@ class MCPBackend:
         return await self.call("connect_nodes", output_node=output_node,
                                input_node=input_node, input_index=input_index)
 
-    async def exec_python(self, code: str):
+    async def exec_python(self, code: str, timeout: float | None = None):
+        # le serveur MCP gere son propre timeout : on l'accepte pour garder la meme signature
         return await self.call("execute_python", code=code, confirm=True)
+
+    async def send_only_python(self, code: str):
+        raise BackendError("send_only_python n'existe pas en backend MCP : pas d'envoi non "
+                           "bloquant sur stdio (utiliser --backend addon pour ce scenario)")
 
 
 # --------------------------------------------------------------------------- session/step API

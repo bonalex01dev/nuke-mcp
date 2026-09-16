@@ -73,3 +73,42 @@ accroche a la sortie du blinkscript.
 
 Les nodes crees s'appellent `test01_*` et sont supprimes en debut de run (idempotence) ; laisses en
 place a la fin pour inspection sauf `--cleanup`.
+
+## Scenarios
+
+- `test01` — checkerboard + blur(20) + BlinkScript(blink01) + viewer1 (11/11 en 0,7 s)
+- `test02` — kernel en ERREUR (blink02) : compilation non bloquante, popup fermee, controle negatif
+  (12/12 en ~14 s)
+
+## test02 — kernel en erreur (blink02) : ce que la compilation ratee apprend
+
+`blink02.blink` = le kernel de test01 avec une faute volontaire : line 47, `sin(anglee)`.
+
+Charge puis compile ce kernel demande trois precautions, toutes decouvertes en le faisant :
+
+1. **Un kernel qui ne compile pas ouvre une modale qui bloque TOUT Nuke.** Le clic `recompile` ne
+   rend alors jamais la main (>240 s mesure) et, tant que la popup est ouverte, PLUS AUCUNE
+   commande de l'addon n'aboutit — pas meme le handshake. Une compilation se lance donc en **envoi
+   non bloquant** (`AddonBackend.send_only_python`).
+2. **Aucun garde-fou in-process ne peut fermer cette popup.** Un `QTimer` arme avant le clic ne
+   tire pas (verifie : 0 tick, journal par fichier) : Nuke n'itere pas la boucle d'evenements
+   pendant le blocage. La fermeture se fait **de l'exterieur**, par `WM_CLOSE` sur la fenetre
+   intitulee exactement `Nuke` (`harness.dismiss_nuke_dialogs`) : le bouton OK n'est pas cliquable
+   depuis Win32 (Qt dessine ses widgets, pas de fenetre enfant native) mais WM_CLOSE referme la
+   modale et debloque Nuke.
+3. **`disable=True` avant de charger, compiler ou brancher le viewer.** Le wiring du viewer
+   declenche une evaluation, donc la popup. Le noeud reste desactive a la fin du test.
+
+Le **texte** du rapport n'est exposé nulle part dans l'API : `node.error()` reste `False`, aucun
+knob ne le porte, l'editeur kernelSource ne contient que la source. Il n'existe que dans deux
+sources d'interface :
+- la **popup** — lisible depuis l'exterieur (arbre d'accessibilite Windows) tant qu'elle est
+  ouverte ; texte constant a chaque essai :
+  `Error compiling kernel: File blink02.blink, Line 47: use of undeclared identifier 'anglee'; did you mean 'angle'?`
+- l'**`ErrorTable`** du panneau Properties (sous l'editeur du kernel, surmontee du bouton
+  `n Errors Total`) — elle n'existe que si le noeud est ACTIF et affiche **au moment** de l'echec :
+  la reactiver apres coup ne la cree pas.
+
+test02 verifie donc ce qui est deterministe : la compilation ratee a bien lieu, la popup est
+detectee et fermee, Nuke n'est pas reste bloque, et le controle negatif (blink01, kernel valide)
+ne produit ni popup ni erreur. Le texte du rapport se lit par l'arbre d'accessibilite.
