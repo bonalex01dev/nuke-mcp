@@ -42,6 +42,10 @@ Toggle: panel button "Start with Nuke" (the addon never creates or edits Nuke pr
     from the Pane menu) and the whole block is skipped when there is no GUI.
 - (0.2.0 was an intermediate revision during the 2026-09-16 session, superseded by 0.2.1.)
 
+## TODO
+Open work, decisions taken and ideas for this fork: see **`TODO.md`** at the repo root
+(kept on this branch only).
+
 ## Gotcha: `execute_python` and comprehensions
 `_handle_execute_python` runs `exec(code, {"nuke": ...}, local_vars)` with **separate** globals and
 locals, so a module-level list comprehension cannot see the exec'd locals
