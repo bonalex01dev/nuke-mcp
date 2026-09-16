@@ -18,11 +18,12 @@ import os
 import queue
 import socket
 import threading
+import time
 
 log = logging.getLogger("NukeMCP")
 
 DEFAULT_PORT = 54321
-ADDON_VERSION = "0.1.0-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
+ADDON_VERSION = "0.2.1-hermes"  # bump at each edit; shown in panel title, start() log, and handshake
 
 # ---------------------------------------------------------------------------
 # PySide import (PySide6 for Nuke 16+, PySide2 fallback)
@@ -84,20 +85,38 @@ def _handle_ping(params: dict) -> dict:
     return {"status": "ok", "result": "pong"}
 
 
+def _format_info(root):
+    """Format du script en dict serialisable.
+
+    Avant : str(root.format()) renvoyait "<_nuke.Format object at 0x...>" — inexploitable
+    pour le client MCP (c'est cette valeur qui se retrouvait dans les snapshots memoire).
+    """
+    try:
+        f = root.format()
+        return {"name": f.name(), "width": f.width(), "height": f.height()}
+    except Exception:
+        return None
+
+
 def _handle_get_script_info(params: dict) -> dict:
+    """Info du script courant. Robuste quand AUCUN script n'est ouvert (root partiel)."""
     nuke = _get_nuke()
     root = nuke.root()
-    return {
-        "status": "ok",
-        "result": {
-            "name": root.name(),
-            "frame_range": [root["first_frame"].value(), root["last_frame"].value()],
-            "fps": root["fps"].value(),
-            "format": str(root.format()),
-            "colorspace": root["colorManagement"].value(),
-            "node_count": len(nuke.allNodes()),
-        },
-    }
+    out = {"name": "", "frame_range": None, "fps": None, "format": None,
+           "colorspace": None, "node_count": 0}
+    try:
+        out["name"] = root.name() if root is not None else ""
+        out["frame_range"] = [root["first_frame"].value(), root["last_frame"].value()]
+        out["fps"] = root["fps"].value()
+        out["format"] = _format_info(root)
+        try:
+            out["colorspace"] = root["colorManagement"].value()
+        except Exception:
+            out["colorspace"] = None
+        out["node_count"] = len(nuke.allNodes())
+    except Exception as e:
+        return {"status": "error", "error": "get_script_info: %r" % (e,)}
+    return {"status": "ok", "result": out}
 
 
 def _handle_get_node_info(params: dict) -> dict:
@@ -742,7 +761,7 @@ class NukeMCPServer:
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_sock.settimeout(1.0)
         self._server_sock.bind(("127.0.0.1", self.port))
-        self._server_sock.listen(1)
+        self._server_sock.listen(8)
         self._emit_log(f"Listening on port {self.port}")
 
         while self._running:
@@ -854,7 +873,14 @@ class NukeMCPServer:
 # ---------------------------------------------------------------------------
 
 class NukeMCPPanel(QWidget):
-    """Dockable panel showing NukeMCP server status and log."""
+    """Panneau NukeMCP : bouton Start/Stop + log.
+
+    AUCUN affichage d'etat n'est maintenu en continu : l'ancien label "Stopped" etait faux
+    par construction (initialise en dur, rafraichi seulement au toggle) pour toute pane
+    creee par Nuke apres le demarrage, et le log n'y etait branche que dans ce meme cas.
+    Desormais l'etat n'est jamais *suppose* : il est MESURE au clic et ECRIT dans le log,
+    qui est le seul canal de verite (et il est branche des la construction).
+    """
 
     def __init__(self, port: int = DEFAULT_PORT, parent=None):
         super().__init__(parent)
@@ -865,44 +891,64 @@ class NukeMCPPanel(QWidget):
         _track_instance(self)
         self._port = port
 
-        # Status row
-        status_layout = QHBoxLayout()
-        self._status_label = QLabel("Stopped")
-        self._port_label = QLabel(f"Port: {self._port}")
+        # Ligne unique : port + auto-start + bouton neutre (jamais de faux etat affiche)
+        self._port_label = QLabel("Port: %d" % self._port)
         self._auto_btn = QPushButton("Start with Nuke: off")
         self._auto_btn.setCheckable(True)
         self._auto_btn.setChecked(_read_pref())
         self._auto_btn.setText(
             "Start with Nuke: " + ("on" if self._auto_btn.isChecked() else "off"))
         self._auto_btn.clicked.connect(self._toggle_autostart_pref)
-        self._toggle_btn = QPushButton("Start")
+        self._toggle_btn = QPushButton("Start/Stop")
         self._toggle_btn.clicked.connect(self.toggle_server)
-        status_layout.addWidget(self._status_label)
-        status_layout.addStretch()
-        status_layout.addWidget(self._auto_btn)
-        status_layout.addWidget(self._port_label)
-        status_layout.addWidget(self._toggle_btn)
+        row = QHBoxLayout()
+        row.addWidget(self._port_label)
+        row.addStretch()
+        row.addWidget(self._auto_btn)
+        row.addWidget(self._toggle_btn)
 
-        # Log area
         self._log = QTextEdit()
         self._log.setReadOnly(True)
 
         layout = QVBoxLayout()
-        layout.addLayout(status_layout)
+        layout.addLayout(row)
         layout.addWidget(self._log)
         self.setLayout(layout)
 
+        # Log branche DES la construction (une pane ouverte en cours de route doit
+        # recevoir les evenements du serveur deja en marche), puis banniere d'etat MESURE.
+        self._log_connected = False
+        self._connect_log()
+        self._append_log("NukeMCP v%s - port %d - etat mesure: %s"
+                         % (ADDON_VERSION, self._port,
+                            "running" if server_running() else "stopped"))
+        self._append_log("Start/Stop = demarrer ou arreter ; 'Start with Nuke: on' = "
+                         "demarrage automatique au lancement de Nuke")
+
+    def _connect_log(self):
+        """Branche le signal de log du serveur (une seule fois)."""
+        if self._log_connected:
+            return
+        if _server_standalone is not None and _server_standalone.on_log is not None:
+            try:
+                _server_standalone.on_log.connect(self._append_log)
+                self._log_connected = True
+            except Exception as e:
+                self._append_log("log serveur non branche: %r" % (e,))
+
     def toggle_server(self):
-        """Start or stop the module-level server, then sync the UI."""
+        """Start/stop puis ecrit l'etat REELLEMENT mesure (jamais un etat suppose)."""
         if server_running():
             stop()
         else:
             _start_standalone(self._port)
+            self._connect_log()
         self.refresh()
+        self._append_log("-> etat mesure: %s (port %d)"
+                         % ("running" if server_running() else "stopped", self._port))
         return server_running()
 
     def _toggle_autostart_pref(self):
-        """Toggle the persisted 'start with Nuke' preference."""
         val = self._auto_btn.isChecked()
         _write_pref(val)
         self._auto_btn.setText("Start with Nuke: " + ("on" if val else "off"))
@@ -912,16 +958,12 @@ class NukeMCPPanel(QWidget):
         return server_running()
 
     def refresh(self):
-        """Sync status label, button text, and log source with module state."""
+        """Rebranche le log si le serveur a (re)demarre. Rien d'autre a synchroniser :
+        aucun label d'etat ne peut se desynchroniser."""
         running = server_running()
-        self._status_label.setText("Running" if running else "Stopped")
-        self._toggle_btn.setText("Stop" if running else "Start")
-        if running and not getattr(self, "_log_connected", False):
-            if _server_standalone is not None and _server_standalone.on_log is not None:
-                _server_standalone.on_log.connect(self._append_log)
-                self._log_connected = True
-                self._append_log("addon v%s - server running on port %d"
-                                 % (ADDON_VERSION, self._port))
+        if running:
+            self._connect_log()
+        return running
 
     def _append_log(self, msg: str):
         self._log.append(msg)
@@ -943,6 +985,7 @@ class NukeMCPPanel(QWidget):
 
 _panel = None
 _server_standalone = None
+_server_registry = []  # TOUS les serveurs crees : jamais de serveur orphelin
 _instances = []  # live NukeMCPPanel widgets, incl. pane-docked ones created by Nuke
 
 
@@ -986,7 +1029,7 @@ def _write_pref(value: bool):
         with open(PREF_FILE, "w") as f:
             json.dump({"start_active": bool(value)}, f)
     except Exception as e:
-        print("[NukeMCP] prefs write error: %s" % e)
+        _log_to_panels("prefs write error: %s" % e)
 
 
 def _register_panel():
@@ -1012,17 +1055,54 @@ def _live_panels():
     return _instances
 
 
+def _log_to_panels(msg: str):
+    """Ecrit un message dans le log de TOUTES les panes vivantes (+ stdout + log fichier).
+
+    Canal unique pour ce qui partait avant dans le vide : erreurs de demarrage, echec
+    d'enregistrement du panel, erreur d'ecriture des prefs. Sans ca, un echec est invisible.
+    """
+    print("[NukeMCP] %s" % msg)
+    try:
+        log.info(msg)
+    except Exception:
+        pass
+    for panel in _live_panels():
+        try:
+            panel._append_log(msg)
+        except Exception:
+            pass
+
+
+def _port_in_use(port: int, timeout: float = 0.5, tries: int = 3) -> bool:
+    """True si quelqu'un ecoute sur le port.
+
+    PLUSIEURS tentatives : la boucle accept du serveur traite UN client a la fois, donc une
+    connexion de controle peut etre refusee pendant qu'une requete est en cours d'execution.
+    Un seul essai produisait de faux "port libre" (et un second serveur cree pour rien).
+    """
+    for i in range(max(1, tries)):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                return True
+        except OSError:
+            if i < tries - 1:
+                time.sleep(0.25)
+    return False
+
+
 def show_panel():
     """Show/reopen the dockable NukeMCP pane panel (via Pane menu command)."""
     global _panel
     panels = _live_panels()
     if panels:
-        try:
-            panels[0].show()
-            panels[0].raise_()
-            return panels[0]
-        except Exception:
-            pass
+        # Chaque appel est protege separement : un raise_() qui echoue ne doit pas faire
+        # tomber dans le chemin "creation", qui ouvrait une SECONDE pane pour rien.
+        for meth in ("show", "raise_", "setFocus"):
+            try:
+                getattr(panels[0], meth)()
+            except Exception:
+                pass
+        return panels[0]
     # No live instance: reopen through the registered Pane menu command
     nuke = _get_nuke()
     try:
@@ -1041,62 +1121,90 @@ def show_panel():
     return _panel
 
 
-def start(port: int = DEFAULT_PORT):
-    """Start the NukeMCP server and show the panel. Call from menu.py or Script Editor."""
-    global _panel
-    nuke = _get_nuke()
-    if not getattr(nuke, "GUI", False):
-        # Headless render worker / terminal mode: run the socket server only,
-        # never touch Qt (panel registration would crash without QApplication).
-        return _start_standalone(port)
-    import os as _os
-    _src = _os.path.abspath(__file__)
-    _msg = "nuke_mcp_addon v%s from %s (module mtime: %s)" % (
-        ADDON_VERSION, _src, _os.path.getmtime(_src))
-    log.info(_msg)
-    print("[NukeMCP]", _msg)
-    _register_panel_once()
-    show_panel()
-    panels = _live_panels()
-    if not panels:
-        # Widget instance not reachable: run the server standalone (logs to stdout).
-        return _start_standalone(port)
-    for panel in panels:
-        if hasattr(panel, "_append_log"):
-            panel._append_log(_msg)
-        if not panel.is_running():
-            panel.toggle_server()
-    return True
-
-
-def _start_standalone(port: int = DEFAULT_PORT):
-    """Run the module-level server (used with or without a panel)."""
-    global _server_standalone
-    if _server_standalone and _server_standalone._running:
-        return True
+def stop_server_object(srv) -> bool:
+    """Arrete un serveur precis et libere son socket (utilise par stop() et par le menage)."""
     try:
-        _server_standalone = NukeMCPServer(port)
-        _server_standalone.start()
-        print("[NukeMCP] server running on port %d" % port)
+        srv.stop()
         return True
     except Exception as e:
-        print("[NukeMCP] start error: %s" % e)
+        _log_to_panels("stop error: %s" % e)
         return False
 
 
+def _start_standalone(port: int = DEFAULT_PORT):
+    """Demarre le serveur au niveau module, IDEMPOTENT et sans jamais perdre un serveur vivant.
+
+    Ordre volontaire (chaque branche journalisee) :
+      1. notre serveur tourne et le port repond           -> rien a faire
+      2. notre serveur croit tourner mais rien n'ecoute   -> on l'arrete proprement (socket libere)
+      3. le port est tenu par QUELQU'UN D'AUTRE (autre Nuke) -> on ne cree pas de second serveur
+      4. sinon                                            -> creation + verification du bind
+    L'ancien code ecrasait _server_standalone avec un nouvel objet quand le port etait occupe :
+    le serveur vivant devenait orphelin (plus arretable) et l'etat affiche faux.
+    """
+    global _server_standalone
+    busy = _port_in_use(port)
+    ours = _server_standalone is not None and _server_standalone._running
+
+    if ours and busy:
+        return True
+    if ours and not busy:
+        _log_to_panels("serveur local vivant mais plus d'ecoute sur %d -> arret propre" % port)
+        stop_server_object(_server_standalone)
+        _server_standalone = None
+    elif not ours and busy:
+        _log_to_panels("port %d deja tenu par une autre instance de Nuke - serveur local NON demarre"
+                       % port)
+        return False
+
+    try:
+        srv = NukeMCPServer(port)
+        srv.start()
+        _server_standalone = srv
+        _server_registry.append(srv)
+    except Exception as e:
+        _log_to_panels("start error: %s" % e)
+        return False
+
+    # Le bind se fait DANS le thread : on verifie l'ecoute reelle avant d'annoncer "running".
+    for _ in range(25):
+        if _port_in_use(port):
+            _log_to_panels("server running on port %d" % port)
+            return True
+        time.sleep(0.1)
+    _log_to_panels("start failed: rien n'ecoute sur le port %d" % port)
+    stop_server_object(srv)
+    if _server_standalone is srv:
+        _server_standalone = None
+    return False
+
+
 def server_running() -> bool:
-    """True if the module-level server is running."""
-    return bool(_server_standalone and _server_standalone._running)
+    """True si AU MOINS UN serveur cree par ce module est vivant (registre, pas la seule
+    derniere reference : un serveur ne doit jamais pouvoir etre perdu de vue)."""
+    return any(getattr(srv, "_running", False) for srv in _server_registry)
 
 
 def start(port: int = DEFAULT_PORT):
-    """Start the NukeMCP server and show the panel. Call from menu.py or Script Editor."""
-    global _panel
+    """Demarre le serveur NukeMCP ; en GUI seulement, ouvre la fenetre.
+
+    GUI      : enregistre la pane (une fois), ouvre la fenetre, demarre le serveur.
+    Headless : AUCUN Qt, aucun menu, aucun panel — juste le socket (nuke -t, render
+               workers). Si le port est deja tenu par une autre instance de Nuke, on ne
+               fait rien : une seule instance est pilotable a la fois, et c'est celle qui
+               ecoute deja. Aucun bruit d'erreur dans les render workers.
+
+    Retourne l'etat MESURE (True si le serveur tourne apres l'appel).
+    """
     nuke = _get_nuke()
     if not getattr(nuke, "GUI", False):
-        # Headless render worker / terminal mode: run the socket server only,
-        # never touch Qt (panel registration would crash without QApplication).
-        return _start_standalone(port)
+        if _port_in_use(port):
+            print("[NukeMCP] headless: port %d deja tenu par une autre instance - autostart ignore" % port)
+            return False
+        ok = _start_standalone(port)
+        print("[NukeMCP] headless: serveur %s sur le port %d (dispatch direct dans le thread socket)"
+              % ("demarre" if ok else "ECHEC au demarrage", port))
+        return server_running()
     import os as _os
     _src = _os.path.abspath(__file__)
     _msg = "nuke_mcp_addon v%s from %s (module mtime: %s)" % (
@@ -1105,9 +1213,9 @@ def start(port: int = DEFAULT_PORT):
     print("[NukeMCP]", _msg)
     _register_panel_once()
     show_panel()
-    ok = _start_standalone(port)
+    _start_standalone(port)
     _refresh_panels()
-    return ok
+    return server_running()
 
 
 def _refresh_panels():
@@ -1120,20 +1228,16 @@ def _refresh_panels():
 
 
 def stop():
-    """Stop the NukeMCP server. Safe to call when already stopped."""
+    """Arrete TOUS les serveurs crees par ce module. Sûr si deja arrete."""
     global _server_standalone
     stopped = False
-    if _server_standalone is not None and _server_standalone._running:
-        try:
-            _server_standalone.stop()
-            stopped = True
-        except Exception as e:
-            print("[NukeMCP] stop error: %s" % e)
+    for srv in list(_server_registry):
+        if getattr(srv, "_running", False):
+            stopped = stop_server_object(srv) or stopped
     _server_standalone = None
     _refresh_panels()
     if stopped:
-        log.info("NukeMCP server stopped")
-        print("[NukeMCP] server stopped")
+        _log_to_panels("server stopped")
     else:
         print("[NukeMCP] server was not running")
     return stopped
@@ -1149,5 +1253,5 @@ def _register_panel_once():
             _register_panel()
             _panel_registered = True
         except Exception as e:
-            print("[NukeMCP] panel registration failed: %s" % e)
+            _log_to_panels("panel registration failed: %s" % e)
             _panel_registered = True  # don't retry every call

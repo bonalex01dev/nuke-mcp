@@ -1,16 +1,17 @@
-# NukeMCP — snippet for the user's ~/.nuke/init.py (Hermes integration).
-# Merge the marked block into your existing init.py.
-# --- BEGIN NukeMCP block ---
-# Auto-start the MCP server if the preference (external JSON file) is active.
+# --- NukeMCP (ajout Hermes) -------------------------------------------
+# Auto-demarrage du serveur si la preference est active (~/.nuke/nukemcp_prefs.json).
+# GUI      : serveur + fenetre (Pane > NukeMCP).
+# Headless : AUCUN Qt / menu / panel, juste le socket — et seulement si le port 54321 est
+#            libre (nuke -t, render workers : une seule instance pilotable a la fois).
+# nuke_mcp_addon.start() fait lui-meme la distinction GUI/headless et renvoie l'etat MESURE.
 
 def _nukemcp_autostart():
     try:
-        import nuke
-        if not nuke.GUI:
-            return  # render workers / terminal mode: no UI, no autostart
         import nuke_mcp_addon
-        if nuke_mcp_addon._read_pref():
-            nuke_mcp_addon.start()
+        if not nuke_mcp_addon._read_pref():
+            print("[NukeMCP] autostart: desactive dans les preferences")
+            return
+        print("[NukeMCP] autostart -> %s" % nuke_mcp_addon.start())
     except Exception as e:
         print("[NukeMCP] autostart failed: %s" % e)
 
@@ -19,4 +20,3 @@ try:
     _nukemcp_autostart()
 except Exception as e:
     print("[NukeMCP] init error: %s" % e)
-# --- END NukeMCP block ---

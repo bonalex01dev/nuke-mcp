@@ -1,27 +1,34 @@
-# NukeMCP — snippet for the user's ~/.nuke/menu.py (Hermes integration).
-# Merge the marked block into your existing menu.py.
-# --- BEGIN NukeMCP block ---
-nukemcp_mcp_menu = nuke.menu("Nuke").menu("Scripts").addMenu("MCP Server")
-nukemcp_mcp_menu.addCommand(
-    "Start MCP server",
-    "import nuke_mcp_addon; nuke_mcp_addon.start()",
-)
-nukemcp_mcp_menu.addCommand(
-    "Stop MCP server",
-    "import nuke_mcp_addon; nuke_mcp_addon.stop()",
-)
-nukemcp_mcp_menu.addCommand(
-    "Toggle auto-start on Nuke launch",
-    "import nuke_mcp_addon; nuke_mcp_addon._write_pref(not nuke_mcp_addon._read_pref()); "
-    "print('[NukeMCP] auto-start', 'enabled' if nuke_mcp_addon._read_pref() else 'disabled')",
-)
-nukemcp_mcp_menu.addCommand(
-    "Show NukeMCP panel",
-    "import nuke_mcp_addon; nuke_mcp_addon.show_panel()",
-)
+# --- NukeMCP (ajout Hermes) -------------------------------------------
+# Menu Scripts > MCP Server : Start / Stop. Les callables importent le module a la volee :
+# les chaines de commande de Nuke s'executent dans un contexte ou un simple
+# "import x; x.y()" peut lever NameError.
+# AUCUN menu n'est cree sans GUI (mode -t / render workers) : l'entree "Show panel" a ete
+# retiree (elle ne fonctionnait pas) — la fenetre s'ouvre par le menu Pane > NukeMCP.
 
-nukemcp_toolbar = nuke.menu("Nodes")
-nukemcp_menu = nukemcp_toolbar.addMenu("NukeMCP")
-nukemcp_menu.addCommand("Start Server", "import nuke_mcp_addon; nuke_mcp_addon.start()")
-nukemcp_menu.addCommand("Stop Server", "import nuke_mcp_addon; nuke_mcp_addon.stop()")
-# --- END NukeMCP block ---
+def _nukemcp_start():
+    import nuke_mcp_addon
+    nuke_mcp_addon.start()
+
+
+def _nukemcp_stop():
+    import nuke_mcp_addon
+    nuke_mcp_addon.stop()
+
+
+def _nukemcp_add_menus():
+    scripts = nuke.menu("Nuke").addMenu("Scripts")  # sous-menu Scripts existant (idempotent)
+    m = scripts.addMenu("MCP Server")
+    m.addCommand("Start MCP server", _nukemcp_start)
+    m.addCommand("Stop MCP server", _nukemcp_stop)
+    n = nuke.menu("Nodes").addMenu("NukeMCP")
+    n.addCommand("Start Server", _nukemcp_start)
+    n.addCommand("Stop Server", _nukemcp_stop)
+
+
+try:
+    if getattr(nuke, "GUI", False):
+        _nukemcp_add_menus()
+    else:
+        print("[NukeMCP] pas de GUI: aucun menu cree (serveur socket uniquement)")
+except Exception as e:
+    print("[NukeMCP] menu non cree: %s" % e)
